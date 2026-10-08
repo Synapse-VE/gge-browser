@@ -8,6 +8,7 @@ ES: Punto de entrada. Lanza Chrome, conecta el relay CDP, y permite
 import readline
 import sys
 
+import lib.empire_decoder as empire_decoder
 from lib.gge_socket_browser import GgeSocketBrowser
 from lib.gge_browser_selenium import connect_with_browser
 from lib.colors import colors
@@ -45,7 +46,11 @@ if __name__ == '__main__':
     )
 
     # EN: REPL loop. Whatever is typed here is forwarded to the game via CDP.
+    #     Special local commands (starting with '/') are handled here and
+    #     not forwarded to the game.
     # ES: Bucle REPL. Lo que se escriba aca se reenvia al juego via CDP.
+    #     Los comandos locales (que empiezan con '/') se manejan aca y
+    #     no se reenvian al juego.
     while True:
         try:
             msg = input("> ")
@@ -53,6 +58,35 @@ if __name__ == '__main__':
             break
         if not msg:
             continue
+
+        # EN: Local command: /full -> disable truncation of decoded JSON.
+        # ES: Comando local: /full -> desactiva el truncado del JSON decodificado.
+        if msg.strip() in ("/full", "/full on"):
+            empire_decoder.DECODED_PREVIEW_MAX = None
+            print("[i] Full JSON mode ON / Modo JSON completo ACTIVADO")
+            continue
+
+        # EN: Local command: /full off -> restore truncation (400 chars).
+        # ES: Comando local: /full off -> restaura el truncado (400 chars).
+        if msg.strip() == "/full off":
+            empire_decoder.DECODED_PREVIEW_MAX = 400
+            print("[i] Full JSON mode OFF (400 chars) / Modo JSON completo DESACTIVADO")
+            continue
+
+        # EN: Local command: /full <n> -> custom truncation limit.
+        # ES: Comando local: /full <n> -> limite de truncado custom.
+        if msg.strip().startswith("/full "):
+            parts = msg.strip().split()
+            if len(parts) == 2:
+                try:
+                    empire_decoder.DECODED_PREVIEW_MAX = int(parts[1])
+                    print(f"[i] Truncation limit set to {parts[1]} / Limite de truncado: {parts[1]}")
+                    continue
+                except ValueError:
+                    pass
+            print("[!] Usage / Uso: /full | /full on | /full off | /full <n>")
+            continue
+
         relay = getattr(socket, "cdp_relay", None)
         if relay is None:
             print("[!] Relay not ready yet. Wait for 'CDP relay activo'.")
