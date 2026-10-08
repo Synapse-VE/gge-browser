@@ -1,3 +1,10 @@
+"""
+EN: Entry point. Launches Chrome, connects the CDP relay, and lets the
+    user send raw Empire protocol commands from the terminal.
+ES: Punto de entrada. Lanza Chrome, conecta el relay CDP, y permite
+    enviar comandos crudos del protocolo Empire desde la terminal.
+"""
+
 import readline
 import sys
 
@@ -7,12 +14,20 @@ from lib.colors import colors
 
 
 def print_preserve_input(message):
-    input = readline.get_line_buffer()
-    sys.stdout.write(f"\x1b[2K\r{message}\n> {input}")
+    """
+    EN: Print a message without losing the line currently being typed.
+    ES: Imprime un mensaje sin perder la linea que se esta escribiendo.
+    """
+    input_buf = readline.get_line_buffer()
+    sys.stdout.write(f"\x1b[2K\r{message}\n> {input_buf}")
     sys.stdout.flush()
 
 
 if __name__ == '__main__':
+    # EN: Callback container. In the CDP relay architecture this object
+    #     does not open a real WebSocket; it only holds callbacks.
+    # ES: Contenedor de callbacks. En la arquitectura de relay CDP este
+    #     objeto no abre un WebSocket real; solo guarda callbacks.
     socket = GgeSocketBrowser(
         on_send=lambda ws, message: print_preserve_input(colors.LIGHT_GREEN + message + colors.ENDC),
         on_open=lambda ws: print_preserve_input(colors.LIGHT_MAGENTA + 'WebSocket opened' + colors.ENDC),
@@ -21,7 +36,30 @@ if __name__ == '__main__':
         on_close=lambda ws, close_status_code, close_msg: print_preserve_input(colors.LIGHT_MAGENTA + f'WebSocket closed with code {close_status_code} and message {close_msg}' + colors.ENDC),
     )
 
-    connect_with_browser(socket, 'https://danadum.github.io/empire', 8765)
+    # EN: Launch Chrome and start the CDP relay.
+    # ES: Lanza Chrome y arranca el relay CDP.
+    connect_with_browser(
+        socket,
+        'https://danadum.github.io/empire',
+        8765,
+    )
 
+    # EN: REPL loop. Whatever is typed here is forwarded to the game via CDP.
+    # ES: Bucle REPL. Lo que se escriba aca se reenvia al juego via CDP.
     while True:
-        socket.send(input("> "))
+        try:
+            msg = input("> ")
+        except EOFError:
+            break
+        if not msg:
+            continue
+        relay = getattr(socket, "cdp_relay", None)
+        if relay is None:
+            print("[!] Relay not ready yet. Wait for 'CDP relay activo'.")
+            print("[!] El relay todavia no esta listo. Espera a 'CDP relay activo'.")
+            continue
+        try:
+            relay.send_to_game(msg)
+            print(f"[SEND] {msg}")
+        except Exception as e:
+            print(f"[!] Error: {e}")
