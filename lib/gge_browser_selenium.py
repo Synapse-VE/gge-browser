@@ -8,7 +8,6 @@ ES: Lanza Chrome con las flags necesarias para el relay CDP,
 import threading
 import traceback
 import os
-import re
 import time
 
 from selenium import webdriver
@@ -17,69 +16,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 from lib.cdp_relay import CdpRelay
-
-# EN: Raw log file for auditing every frame without truncation.
-# ES: Archivo de log crudo para auditar todos los frames sin truncar.
-RAW_LOG = "/tmp/gge_raw.log"
-_raw_fp = open(RAW_LOG, "a", buffering=1)
-
-
-def format_payload(payload, direction):
-    """
-    EN: Convert a raw WebSocket frame into a human-readable line.
-    ES: Convierte un frame WebSocket crudo en una linea legible.
-    direction: "RECV" (from server) or "SENT" (from client).
-    """
-    # EN: Always write the raw frame to file first.
-    # ES: Siempre escribimos el frame crudo al archivo primero.
-    _raw_fp.write(f"\n=== {direction} ({len(payload)} bytes) ===\n{payload}\n")
-
-    # EN: Base64-encoded binary blob (starts with JXh0 = "%xt" in base64).
-    # ES: Blob binario codificado en base64 (empieza con JXh0 = "%xt" en base64).
-    if payload.startswith("JXh0"):
-        return f"[{direction}] [BIN] base64 payload ({len(payload)} bytes)"
-
-    # EN: SmartFox XML message.
-    # ES: Mensaje XML de SmartFox.
-    if payload.startswith("<"):
-        m = re.match(r"<msg t='(.*?)'><body action='(.*?)' r='(.*?)'>(.*?)</body></msg>", payload)
-        if m:
-            t, action, r, data = m.groups()
-            return f"[{direction}] [XML] t={t} action={action} r={r} data={data[:120]}"
-        return f"[{direction}] [XML] {payload[:120]}"
-
-    # EN: EmpireEx protocol: %xt%EmpireEx_NN%<cmd>%<status>%<json>%
-    # ES: Protocolo EmpireEx: %xt%EmpireEx_NN%<cmd>%<status>%<json>%
-    if payload.startswith("%xt%"):
-        parts = payload.strip("%").split("%")
-        if len(parts) >= 4:
-            cmd = parts[2] if len(parts) > 2 else "?"
-            status = parts[3] if len(parts) > 3 else "?"
-            data = "%".join(parts[4:]) if len(parts) > 4 else ""
-
-            # EN: Friendly names for the most common commands.
-            # ES: Nombres legibles para los comandos mas comunes.
-            friendly = {
-                "sii": "ServerInfoInit",
-                "hgh": "Highscore",
-                "ama": "AllianceMembers",
-                "irc": "InitResourceCastle",
-                "pin": "Ping",
-                "llp": "LoginLastPlayer",
-                "lli": "LoginInfo",
-                "gpi": "GetPlayerInfo",
-                "gat": "GetAllianceTasks",
-                "all": "AllianceList",
-                "asc": "AskCastle",
-                "grc": "GetResourcesCastle",
-            }.get(cmd, cmd)
-
-            data_preview = data[:200] + ("..." if len(data) > 200 else "")
-            return f"[{direction}] [CMD] {friendly} (status={status}) {data_preview}"
-
-    # EN: Unknown format.
-    # ES: Formato desconocido.
-    return f"[{direction}] [???] {payload[:120]}"
+from lib.empire_decoder import format_payload, RAW_LOG, DECODED_LOG
 
 
 def open_browser(game_url):
@@ -168,6 +105,7 @@ def connect_with_browser(socket, game_url, ws_server_port):
             if relay.ws and relay.ws.sock and relay.ws.sock.connected:
                 print("[PY] CDP relay active. / CDP relay activo.", flush=True)
                 print(f"[PY] Raw log / Log crudo: {RAW_LOG}", flush=True)
+                print(f"[PY] Decoded log / Log decodificado: {DECODED_LOG}", flush=True)
                 socket.cdp_relay = relay
             else:
                 print("[PY] CDP relay did not connect properly. / El relay CDP no conecto bien.", flush=True)
