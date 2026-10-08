@@ -36,6 +36,16 @@ class CdpRelay:
         self.ws = None
         self.msg_id = 0
         self.lock = threading.Lock()
+        # EN: Map of msg_id -> method, to correlate CDP responses with
+        #     the command that triggered them (for logging).
+        # ES: Mapa de msg_id -> method, para correlacionar respuestas CDP
+        #     con el comando que las disparo (para logging).
+        self._pending = {}
+        # EN: requestId of the game's WebSocket, captured via
+        #     Network.webSocketCreated. Kept for diagnostics.
+        # ES: requestId del WebSocket del juego, capturado via
+        #     Network.webSocketCreated. Se guarda para diagnostico.
+        self.game_ws_request_id = None
 
     def _find_target(self):
         """
@@ -91,17 +101,71 @@ class CdpRelay:
         with self.lock:
             self.msg_id += 1
             mid = self.msg_id
+        self._pending[mid] = method
         cmd = {"id": mid, "method": method}
         if params:
             cmd["params"] = params
         self.ws.send(json.dumps(cmd))
 
     def _on_open(self, ws):
-        # EN: Enable the Network domain to receive WebSocket frame events.
-        # ES: Habilita el dominio Network para recibir eventos de frames WebSocket.
-        print("[CDP] Connection open, enabling Network domain", flush=True)
-        print("[CDP] Conexion abierta, habilitando dominio Network", flush=True)
+        # EN: Enable Network (for WS frame events) and Runtime (for
+        #     Runtime.evaluate, used to inject commands).
+        # ES: Habilita Network (para eventos de frames WS) y Runtime (para
+        #     Runtime.evaluate, usado para inyectar comandos).
+        print("[CDP] Connection open, enabling Network + Runtime", flush=True)
+        print("[CDP] Conexion abierta, habilitando Network + Runtime", flush=True)
         self._send_cdp("Network.enable")
+        self._send_cdp("Runtime.enable")
+        # EN: Install the WebSocket hook shortly after enabling Runtime.
+        # ES: Instala el hook del WebSocket poco despues de habilitar Runtime.
+        threading.Thread(target=self._install_ws_hook_later, daemon=True).start()
+
+    def _install_ws_hook_later(self):
+        """
+        EN: Wait a moment for Runtime.enable to be processed, then install
+            the WebSocket hook so we can capture game instances.
+        ES: Espera un momento a que Runtime.enable sea procesado, luego
+            instala el hook del WebSocket para capturar instancias del juego.
+        """
+        time.sleep(0.7)
+        expr = (
+            "(function(){"
+            "  try {"
+            "    if (window.__gge_hooked) {"
+            "      return 'ALREADY list=' + (window.__gge_ws_list ? window.__gge_ws_list.length : 0);"
+            "    }"
+            "    window.__gge_hooked = true;"
+            "    window.__gge_ws_list = [];"
+            "    try {"
+            "      var OrigWS = window.WebSocket;"
+            "      var Wrapped = function(url, protocols) {"
+            "        var ws = (protocols === undefined) ? new OrigWS(url) : new OrigWS(url, protocols);"
+            "        window.__gge_ws_list.push(ws);"
+            "        return ws;"
+            "      };"
+            "      Wrapped.prototype = OrigWS.prototype;"
+            "      Wrapped.CONNECTING = OrigWS.CONNECTING;"
+            "      Wrapped.OPEN = OrigWS.OPEN;"
+            "      Wrapped.CLOSING = OrigWS.CLOSING;"
+            "      Wrapped.CLOSED = OrigWS.CLOSED;"
+            "      window.WebSocket = Wrapped;"
+            "    } catch(e) {}"
+            "    try {"
+            "      var origSend = WebSocket.prototype.send;"
+            "      WebSocket.prototype.send = function() {"
+            "        if (window.__gge_ws_list.indexOf(this) === -1) {"
+            "          window.__gge_ws_list.push(this);"
+            "        }"
+            "        return origSend.apply(this, arguments);"
+            "      };"
+            "    } catch(e) {}"
+            "    return 'HOOK_INSTALLED';"
+            "  } catch(e) {"
+            "    return 'HOOK_ERR: ' + e.message;"
+            "  }"
+            "})()"
+        )
+        self._send_cdp("Runtime.evaluate", {"expression": expr, "returnByValue": True})
 
     def _on_message(self, ws, message):
         try:
@@ -109,8 +173,38 @@ class CdpRelay:
         except Exception:
             return
 
+        # EN: CDP responses have an 'id' and no 'method'. Log them so we
+        #     can see what happened with each command we sent.
+        # ES: Las respuestas CDP tienen 'id' y no 'method'. Las logueamos
+        #     para ver que paso con cada comando que enviamos.
+        if "id" in data and "method" not in data:
+            mid = data["id"]
+            sent = self._pending.pop(mid, "?")
+            if "error" in data:
+                print(f"[CDP] ERROR {sent} id={mid}: {data['error']}", flush=True)
+            elif sent == "Runtime.evaluate":
+                r = data.get("result", {}).get("result", {})
+                v = r.get("value")
+                if v is None:
+                    v = f"<{r.get('type', 'unknown')}>"
+                print(f"[CDP] Runtime.evaluate id={mid} -> {v}", flush=True)
+            return
+
         method = data.get("method")
-        if method == "Network.webSocketFrameReceived":
+        if method == "Network.webSocketCreated":
+            # EN: Keep track of the game WebSocket (only for diagnostics).
+            # ES: Guarda el WebSocket del juego (solo para diagnostico).
+            p = data.get("params", {})
+            url = p.get("url", "")
+            rid = p.get("requestId")
+            if "goodgamestudios.com" in url:
+                self.game_ws_request_id = rid
+                print(
+                    f"[CDP] Game WebSocket created / WebSocket del juego creado: "
+                    f"requestId={rid}",
+                    flush=True,
+                )
+        elif method == "Network.webSocketFrameReceived":
             p = data.get("params", {})
             resp = p.get("response", {})
             payload = resp.get("payloadData", "")
@@ -133,8 +227,46 @@ class CdpRelay:
 
     def send_to_game(self, data):
         """
-        EN: Inject a command into the game WebSocket via Runtime.evaluate.
-        ES: Inyecta un comando en el WebSocket del juego via Runtime.evaluate.
+        EN: Inject a command into the game WebSocket. The game hides its
+            socket inside a module closure (window.socket is undefined),
+            so we hooked WebSocket.prototype.send earlier. Any frame the
+            game sends (e.g. the periodic 'pin') causes our hook to
+            register the instance in window.__gge_ws_list. From there,
+            we just pick the goodgamestudios one and call .send() on it.
+        ES: Inyecta un comando en el WebSocket del juego. El juego esconde
+            su socket dentro de un closure (window.socket es undefined),
+            asi que antes hookeamos WebSocket.prototype.send. Cualquier
+            frame que el juego envie (ej. el 'pin' periodico) hace que
+            nuestro hook registre la instancia en window.__gge_ws_list.
+            Desde ahi, elegimos la de goodgamestudios y llamamos .send().
         """
-        expr = f"window.socket && window.socket.send({json.dumps(data)})"
-        self._send_cdp("Runtime.evaluate", {"expression": expr})
+        payload_literal = json.dumps(data)
+        expr = (
+            "(function(){"
+            f"  var payload = {payload_literal};"
+            "  try {"
+            "    var list = window.__gge_ws_list || [];"
+            "    for (var i = 0; i < list.length; i++) {"
+            "      var ws = list[i];"
+            "      try {"
+            "        if (ws && ws.readyState === 1 && ws.url && String(ws.url).indexOf('goodgamestudios') !== -1) {"
+            "          ws.send(payload);"
+            "          return 'OK i=' + i + ' list=' + list.length + ' url=' + String(ws.url).slice(0, 90);"
+            "        }"
+            "      } catch(e) {}"
+            "    }"
+            "    var info = [];"
+            "    for (var j = 0; j < list.length; j++) {"
+            "      try { info.push(String(list[j].url || '?').slice(0, 60) + ' rs=' + list[j].readyState); }"
+            "      catch(e) { info.push('?'); }"
+            "    }"
+            "    return 'NO_WS_YET list=' + list.length + ' [' + info.join(' | ') + ']';"
+            "  } catch(e) {"
+            "    return 'ERR: ' + e.message;"
+            "  }"
+            "})()"
+        )
+        self._send_cdp("Runtime.evaluate", {
+            "expression": expr,
+            "returnByValue": True,
+        })
