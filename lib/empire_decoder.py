@@ -13,6 +13,7 @@ import base64
 import json
 import os
 import re
+import time
 
 # EN: Raw log file for auditing every frame without truncation.
 # ES: Archivo de log crudo para auditar todos los frames sin truncar.
@@ -21,6 +22,47 @@ RAW_LOG = "/tmp/gge_raw.log"
 # ES: Log decodificado: los mismos frames pero con los blobs base64
 #     expandidos a texto.
 DECODED_LOG = "/tmp/gge_decoded.log"
+# EN: Events log: a replayable timeline of player actions. Every SENT
+#     frame except the ones the client sends on its own (heartbeats,
+#     auto UI refresh). RECV frames are NOT written here on purpose:
+#     this file is meant to list "things the user asked for", so it can
+#     be replayed back into the game. Server replies remain available in
+#     gge_raw.log and gge_decoded.log. Each line is prefixed with a
+#     timestamp.
+# ES: Log de eventos: una linea de tiempo reproducible de acciones del
+#     jugador. Todos los frames SENT salvo los que el cliente manda por
+#     su cuenta (heartbeats, auto-refresh de UI). Los frames RECV NO se
+#     escriben aca a proposito: este archivo lista "cosas que el usuario
+#     pidio", para poder reenviarlas al juego. Las respuestas del server
+#     quedan en gge_raw.log y gge_decoded.log. Cada linea con timestamp.
+EVENTS_LOG = "/tmp/gge_events.log"
+
+# EN: Commands the game client sends on its own (heartbeats, auto UI
+#     refresh). These are NOT player actions and would flood the events
+#     log. Anything else sent by the client is considered a player
+#     action and gets logged.
+# ES: Comandos que el cliente del juego manda por su cuenta (heartbeats,
+#     auto-refresh de UI). NO son acciones del jugador y llenarian el
+#     log de eventos. Cualquier otra cosa que mande el cliente se
+#     considera accion del jugador y se loguea.
+AUTO_SENT_COMMANDS = {
+    "pin",   # heartbeat / latido
+    "gui",   # auto UI refresh / auto-refresh de UI
+}
+
+# EN: (Unused) RECV whitelist. Kept commented for reference: the events
+#     log no longer records server responses, only player requests.
+# ES: (Sin uso) Whitelist de RECV. Queda comentada de referencia: el
+#     log de eventos ya no registra respuestas del server, solo
+#     peticiones del jugador.
+# EVENT_RECV_COMMANDS = {
+#     "ahr", "ahh", "ahf",   # ayuda / help
+#     "bup", "spl", "rue",   # reclutar / recruit
+#     "sne", "dms", "dql",   # eventos / events
+#     "gam",                 # data de tropas/edificios / troop/building data
+#     "gpa", "gui", "all",   # info jugador/alianza / player/alliance info
+#     "gmp", "mrm",          # mapa / map
+# }
 
 # EN: Max characters of the decoded payload to show on the terminal.
 #     Set GGE_DECODED_FULL=1 to disable truncation entirely.
@@ -55,8 +97,58 @@ FRIENDLY_CMD = {
     "gam": "GameMessage",
 }
 
-_raw_fp = open(RAW_LOG, "a", buffering=1)
-_decoded_fp = open(DECODED_LOG, "a", buffering=1)
+# EN: Lazy-opened file handles. Open on first write, not at import time,
+#     so main.py can rotate old logs BEFORE any handle is created.
+# ES: File handles de apertura perezosa. Se abren en la primera escritura,
+#     no al importar, para que main.py pueda rotar los logs viejos ANTES
+#     de que exista algun handle.
+_raw_fp = None
+_decoded_fp = None
+_events_fp = None
+
+
+def init_logs():
+    """
+    EN: Open the log files if they are not already open. Idempotent.
+        Call this once after any rotation, or rely on _log_event /
+        format_payload to call it on first use.
+    ES: Abre los archivos de log si no estan abiertos. Idempotente.
+        Llamar una vez despues de cualquier rotacion, o confiar en que
+        _log_event / format_payload lo llamen en el primer uso.
+    """
+    global _raw_fp, _decoded_fp, _events_fp
+    if _raw_fp is None:
+        _raw_fp = open(RAW_LOG, "a", buffering=1)
+    if _decoded_fp is None:
+        _decoded_fp = open(DECODED_LOG, "a", buffering=1)
+    if _events_fp is None:
+        _events_fp = open(EVENTS_LOG, "a", buffering=1)
+
+
+def _log_event(cmd, direction, decoded):
+    """
+    EN: Log ONLY player actions to the events file: every SENT frame
+        except the ones the client sends on its own (heartbeats, auto UI
+        refresh). RECV frames are intentionally NOT logged here: this
+        file is meant to be a replayable timeline of "things the user
+        asked for", so it can be scripted back into the game. Server
+        replies remain available in gge_raw.log and gge_decoded.log.
+    ES: Loguea SOLO acciones del jugador al archivo de eventos: todos
+        los frames SENT salvo los que el cliente manda por su cuenta
+        (heartbeats, auto-refresh de UI). Los frames RECV NO se loguean
+        aca a proposito: este archivo es una linea de tiempo reproducible
+        de "cosas que el usuario pidio", para poder reenviarlas al juego
+        como script. Las respuestas del server siguen disponibles en
+        gge_raw.log y gge_decoded.log.
+    """
+    # EN: Ensure handles are open (lazy open).
+    # ES: Asegurar que los handles estan abiertos (apertura perezosa).
+    init_logs()
+    if direction != "SENT":
+        return
+    if cmd and cmd not in AUTO_SENT_COMMANDS:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        _events_fp.write(f"[{ts}] [SENT] [{cmd}] {decoded}\n")
 
 
 def _decode_b64_empire(payload):
@@ -146,7 +238,13 @@ def _summarize_json(obj):
 def _format_empire_text(decoded, direction):
     """
     EN: Build a human-readable line for a decoded EmpireEx text frame.
+        The raw EmpireEx header (the part before the JSON body, e.g.
+        'xt%EmpireEx_25%bup%1%0') is shown alongside the friendly name
+        so the full frame prefix is visible on the terminal.
     ES: Construye una linea legible para un frame EmpireEx ya decodificado.
+        El header crudo de EmpireEx (la parte antes del cuerpo JSON, ej.
+        'xt%EmpireEx_25%bup%1%0') se muestra junto al nombre amigable
+        para que el prefijo completo del frame sea visible en terminal.
     """
     if not decoded.startswith("%xt%"):
         # EN: Full output mode: no truncation.
@@ -161,30 +259,43 @@ def _format_empire_text(decoded, direction):
     cmd = _find_command(prefix)
     friendly = FRIENDLY_CMD.get(cmd, cmd or "?")
 
+    # EN: Strip the outer % so the header reads as
+    #     'xt%EmpireEx_25%bup%1%0' instead of '%xt%...%'.
+    # ES: Recortar los % externos para que el header se lea como
+    #     'xt%EmpireEx_25%bup%1%0' en vez de '%xt%...%'.
+    header = prefix.strip("%") if prefix else ""
+
+    # EN: Log to the events file following the SENT/RECV rules.
+    # ES: Loguear al archivo de eventos siguiendo las reglas SENT/RECV.
+    _log_event(cmd, direction, decoded)
+
     if not json_str:
-        return f"[{direction}] [CMD] {friendly}"
+        return f"[{direction}] [CMD] {header} ({friendly})"
 
     try:
         obj = json.loads(json_str)
     except Exception:
         if DECODED_PREVIEW_MAX is None:
-            return f"[{direction}] [CMD] {friendly} (raw) {json_str}"
+            return f"[{direction}] [CMD] {header} ({friendly}) (raw) {json_str}"
         preview = json_str[:DECODED_PREVIEW_MAX]
         suffix = "..." if len(json_str) > DECODED_PREVIEW_MAX else ""
-        return f"[{direction}] [CMD] {friendly} (raw) {preview}{suffix}"
+        return f"[{direction}] [CMD] {header} ({friendly}) (raw) {preview}{suffix}"
 
     summary = _summarize_json(obj)
     try:
         pretty = json.dumps(obj, indent=2, ensure_ascii=False)
     except Exception:
         pretty = json_str
+
+    head = f"[{direction}] [CMD] {header} ({friendly}) ({summary})"
+
     # EN: Full output mode: no truncation.
     # ES: Modo salida completa: sin truncado.
     if DECODED_PREVIEW_MAX is None:
-        return f"[{direction}] [CMD] {friendly} ({summary})\n{pretty}"
+        return f"{head}\n{pretty}"
     preview = pretty[:DECODED_PREVIEW_MAX]
     suffix = "\n..." if len(pretty) > DECODED_PREVIEW_MAX else ""
-    return f"[{direction}] [CMD] {friendly} ({summary})\n{preview}{suffix}"
+    return f"{head}\n{preview}{suffix}"
 
 
 def format_payload(payload, direction):
@@ -193,6 +304,11 @@ def format_payload(payload, direction):
     ES: Convierte un frame WebSocket crudo en una linea legible.
     direction: "RECV" (from server) or "SENT" (from client).
     """
+    # EN: Ensure handles are open (lazy open). No-op after the first call.
+    # ES: Asegurar que los handles estan abiertos (apertura perezosa).
+    #     No-op despues de la primera llamada.
+    init_logs()
+
     # EN: Always write the raw frame to file first.
     # ES: Siempre escribimos el frame crudo al archivo primero.
     _raw_fp.write(f"\n=== {direction} ({len(payload)} bytes) ===\n{payload}\n")
