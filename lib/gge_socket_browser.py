@@ -9,34 +9,24 @@ ES: Archivo legado. En la arquitectura previa al CDP esta clase abria su
 
 import threading
 
-import websocket as _ws_mod
 from pygge.gge_socket import GgeSocket
 
 
-# EN: Legacy monkey-patch. Forces Chrome-like headers on any WebSocket
-#     opened by pygge. Kept for backwards compatibility; not used by the
-#     current CDP relay pipeline.
-# ES: Monkey-patch legado. Fuerza headers tipo Chrome en cualquier
-#     WebSocket abierto por pygge. Se mantiene por compatibilidad; no lo
-#     usa el pipeline actual de relay CDP.
-_orig_wsapp_init = _ws_mod.WebSocketApp.__init__
-
-
-def _patched_wsapp_init(self, url, *args, **kwargs):
-    headers = list(kwargs.get("header", []) or [])
-    headers.extend([
-        "Origin: https://empire-html5.goodgamestudios.com",
-        "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
-        "Accept-Language: es-419,es;q=0.9",
-        "Cache-Control: no-cache",
-        "Pragma: no-cache",
-    ])
-    kwargs["header"] = headers
-    _orig_wsapp_init(self, url, *args, **kwargs)
-
-
-_ws_mod.WebSocketApp.__init__ = _patched_wsapp_init
+# EN: NOTE: the old monkey-patch that forced Chrome-like headers on every
+#     websocket.WebSocketApp instance has been removed. It leaked a GGS
+#     Origin header into the CdpRelay's own WebSocketApp connection to
+#     Chrome (a global side effect), and the current CDP pipeline never
+#     opens a game WebSocket from Python anyway. If you ever need those
+#     headers again for the legacy path, set them explicitly on the
+#     WebSocketApp(...) call instead of patching the class globally.
+# ES: NOTA: el viejo monkey-patch que forzaba headers tipo Chrome en toda
+#     instancia de websocket.WebSocketApp fue eliminado. Filtraba un
+#     header Origin de GGS hacia la conexion WebSocketApp que CdpRelay
+#     abre contra Chrome (side-effect global), y ademas el pipeline CDP
+#     actual nunca abre un WebSocket del juego desde Python. Si alguna
+#     vez necesitas esos headers de nuevo para el path legado, ponelos
+#     explicitamente en la llamada WebSocketApp(...) en vez de parchear
+#     la clase globalmente.
 
 
 class GgeSocketBrowser(GgeSocket):
