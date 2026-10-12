@@ -50,20 +50,6 @@ AUTO_SENT_COMMANDS = {
     "gui",   # auto UI refresh / auto-refresh de UI
 }
 
-# EN: (Unused) RECV whitelist. Kept commented for reference: the events
-#     log no longer records server responses, only player requests.
-# ES: (Sin uso) Whitelist de RECV. Queda comentada de referencia: el
-#     log de eventos ya no registra respuestas del server, solo
-#     peticiones del jugador.
-# EVENT_RECV_COMMANDS = {
-#     "ahr", "ahh", "ahf",   # ayuda / help
-#     "bup", "spl", "rue",   # reclutar / recruit
-#     "sne", "dms", "dql",   # eventos / events
-#     "gam",                 # data de tropas/edificios / troop/building data
-#     "gpa", "gui", "all",   # info jugador/alianza / player/alliance info
-#     "gmp", "mrm",          # mapa / map
-# }
-
 # EN: Max characters of the decoded payload to show on the terminal.
 #     Set GGE_DECODED_FULL=1 to disable truncation entirely.
 #     Set GGE_DECODED_MAX=<n> to use a custom character limit.
@@ -105,6 +91,24 @@ FRIENDLY_CMD = {
 _raw_fp = None
 _decoded_fp = None
 _events_fp = None
+
+# EN: Global response callback. Set by main.py so the HTTP bridge can
+#     pick up every decoded RECV frame and match it to pending requests.
+# ES: Callback global de respuesta. Lo setea main.py para que el puente
+#     HTTP capture cada frame RECV decodificado y lo matchee con
+#     peticiones pendientes.
+_response_callback = None
+
+
+def set_response_callback(cb):
+    """
+    EN: Register a callback invoked for every decoded RECV frame.
+        Signature: cb(cmd: str, json_body: any)
+    ES: Registrar un callback invocado para cada frame RECV decodificado.
+        Firma: cb(cmd: str, json_body: any)
+    """
+    global _response_callback
+    _response_callback = cb
 
 
 def init_logs():
@@ -270,16 +274,41 @@ def _format_empire_text(decoded, direction):
     _log_event(cmd, direction, decoded)
 
     if not json_str:
+        # EN: Notify the bridge even for bodyless frames.
+        # ES: Notificar al puente incluso para frames sin cuerpo.
+        if direction == "RECV" and _response_callback is not None:
+            try:
+                _response_callback(cmd, None)
+            except Exception as e:
+                print(f"[decoder] response callback error: {e}", flush=True)
         return f"[{direction}] [CMD] {header} ({friendly})"
 
     try:
         obj = json.loads(json_str)
     except Exception:
+        # EN: Raw (unparsable) JSON body.
+        # ES: Cuerpo JSON crudo (no parseable).
+        if direction == "RECV" and _response_callback is not None:
+            try:
+                _response_callback(cmd, None)
+            except Exception as e:
+                print(f"[decoder] response callback error: {e}", flush=True)
         if DECODED_PREVIEW_MAX is None:
             return f"[{direction}] [CMD] {header} ({friendly}) (raw) {json_str}"
         preview = json_str[:DECODED_PREVIEW_MAX]
         suffix = "..." if len(json_str) > DECODED_PREVIEW_MAX else ""
         return f"[{direction}] [CMD] {header} ({friendly}) (raw) {preview}{suffix}"
+
+    # EN: Notify the HTTP bridge (only for RECV frames). Done before
+    #     formatting so the HTTP waiter unblocks as fast as possible.
+    # ES: Notificar al puente HTTP (solo para frames RECV). Se hace antes
+    #     del formateo para que el waiter HTTP se desbloquee lo antes
+    #     posible.
+    if direction == "RECV" and _response_callback is not None:
+        try:
+            _response_callback(cmd, obj)
+        except Exception as e:
+            print(f"[decoder] response callback error: {e}", flush=True)
 
     summary = _summarize_json(obj)
     try:

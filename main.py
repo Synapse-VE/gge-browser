@@ -1,8 +1,10 @@
 """
-EN: Entry point. Launches Chrome, connects the CDP relay, and lets the
-    user send raw Empire protocol commands from the terminal.
-ES: Punto de entrada. Lanza Chrome, conecta el relay CDP, y permite
-    enviar comandos crudos del protocolo Empire desde la terminal.
+EN: Entry point. Launches Chrome, connects the CDP relay, starts the HTTP
+    bridge, and lets the user send raw Empire protocol commands from the
+    terminal.
+ES: Punto de entrada. Lanza Chrome, conecta el relay CDP, arranca el
+    puente HTTP, y permite enviar comandos crudos del protocolo Empire
+    desde la terminal.
 """
 
 import os
@@ -14,6 +16,7 @@ import lib.empire_decoder as empire_decoder
 from lib.empire_decoder import RAW_LOG, DECODED_LOG, EVENTS_LOG
 from lib.gge_socket_browser import GgeSocketBrowser
 from lib.gge_browser_selenium import connect_with_browser
+from lib.bridge_server import BridgeServer
 from lib.colors import colors
 
 
@@ -78,6 +81,20 @@ if __name__ == '__main__':
         on_message=None,
         on_error=lambda ws, error: print_preserve_input(colors.LIGHT_RED + f"Error in websocket: {error}" + colors.ENDC),
         on_close=lambda ws, close_status_code, close_msg: print_preserve_input(colors.LIGHT_MAGENTA + f'WebSocket closed with code {close_status_code} and message {close_msg}' + colors.ENDC),
+    )
+
+    # EN: Start the HTTP bridge. It picks up the relay once Chrome is
+    #     connected (the socket exposes .cdp_relay dynamically), so it is
+    #     safe to start before connect_with_browser().
+    # ES: Arrancar el puente HTTP. Toma el relay una vez que Chrome este
+    #     conectado (el socket expone .cdp_relay dinamicamente), asi que
+    #     es seguro arrancarlo antes de connect_with_browser().
+    bridge = BridgeServer(socket, host="0.0.0.0", port=4444, timeout=15.0)
+    empire_decoder.set_response_callback(bridge.handle_response)
+    bridge.start()
+    print(
+        "[PY] Bridge HTTP listening on / Escuchando en http://0.0.0.0:4444",
+        flush=True,
     )
 
     # EN: Launch Chrome and start the CDP relay.
