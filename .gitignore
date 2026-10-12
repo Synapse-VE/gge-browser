@@ -5,4 +5,5 @@ __pycache__/
 .venv/
 .env
 /tmp/*.log
-Comandos GGE*.bak
+Comandos GGE
+*.bak
