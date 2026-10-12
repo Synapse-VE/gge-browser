@@ -24,6 +24,10 @@ ES: El metodo original de proxy WebSocket esta roto en Chrome 145+. Chrome ahora
 
 Esto evita corrupcion binaria y deteccion por fingerprint TLS.
 
+EN: On top of the relay, this fork adds an **HTTP bridge** (see [HTTP Bridge](#http-bridge--puente-http) below) that exposes an `empire-api`-compatible REST API. Backend services that already speak to `empire-api` can point at this bridge instead, gaining full session context (real Chrome login) and unlocking commands like `jca`, `gaa` and `gpi` that time out against the public `empire-api` fork.
+
+ES: Sobre el relay, este fork agrega un **puente HTTP** (ver [HTTP Bridge](#http-bridge--puente-http) mas abajo) que expone una API REST compatible con `empire-api`. Los servicios que ya hablan con `empire-api` pueden apuntar a este puente, ganando contexto de sesion completo (login real de Chrome) y desbloqueando comandos como `jca`, `gaa` y `gpi` que dan timeout contra el fork publico de `empire-api`.
+
 ---
 
 ## Requirements / Requisitos
@@ -39,6 +43,8 @@ Dependencies:
 - `requests`
 - `pygge` (from `requirements.txt`)
 - `websockets`
+- `flask` (for the HTTP bridge)
+- `flask-cors` (for the HTTP bridge)
 
 ---
 
@@ -58,6 +64,7 @@ source .venv/bin/activate     # Linux / macOS
 
 pip install --upgrade pip
 pip install -r requirements.txt
+pip install flask flask-cors
 ```
 
 EN: Make sure `google-chrome` is available on your PATH.
@@ -101,11 +108,24 @@ ES: Chrome se abrira automaticamente, navegara a la pagina del wrapper, y cargar
 2. Espera a que la terminal muestre `CDP relay active.`
 3. Escribe comandos crudos del protocolo en el prompt `>`.
 
+EN: The HTTP bridge starts before Chrome and listens on port `4444` by default. You will see:
+
+```text
+[PY] Bridge HTTP listening on / Escuchando en http://0.0.0.0:4444
+```
+
+ES: El puente HTTP arranca antes que Chrome y escucha en el puerto `4444` por defecto. Vas a ver:
+
+```text
+[PY] Bridge HTTP listening on / Escuchando en http://0.0.0.0:4444
+```
+
 EN: Example session output:
 
 ES: Ejemplo de salida de sesion:
 
 ```text
+[PY] Bridge HTTP listening on / Escuchando en http://0.0.0.0:4444
 [PY] Launching Chrome... / Lanzando Chrome...
 [PY] Chrome: 155.0.8059.39
 [PY] Navigated to / Navegando a: https://danadum.github.io/empire/?nomobileredirect=true
@@ -164,11 +184,17 @@ GGE_DECODED_MAX=2000 python -u main.py  # custom initial limit
 +------------------------------------------+------------------+
 |  Python process                                             |
 |                                                             |
-|  main.py              -> REPL loop                          |
-|  lib/cdp_relay.py     -> CDP client (frames in / cmds out)  |
-|  lib/empire_decoder.py-> base64 decoder + human formatter   |
-|  lib/gge_browser_selenium.py -> launches Chrome, wires up   |
+|  main.py                    -> REPL loop + bridge bootstrap |
+|  lib/cdp_relay.py           -> CDP client (frames in/out)   |
+|  lib/empire_decoder.py      -> base64 decoder + formatter   |
+|  lib/gge_browser_selenium.py-> launches Chrome, wires relay |
+|  lib/bridge_server.py       -> Flask HTTP bridge (REST)     |
 +-------------------------------------------------------------+
+
++------------------------+       HTTP        +-----------------+
+|  GGE tracker backend   | <---------------> |  bridge :4444   |
+|  GGE tracker scrapers  |                   |  (this process) |
++------------------------+                   +-----------------+
 ```
 
 EN: Python never opens its own WebSocket to Goodgame. It only observes and injects frames on Chrome's native socket.
@@ -188,7 +214,7 @@ EN: At the `>` prompt, type any raw Empire protocol command. It is sent to the g
 ES: En el prompt `>`, escribe cualquier comando crudo del protocolo Empire. Se envia al juego via `Runtime.evaluate` llamando `.send()` sobre el socket capturado del juego (ver Arquitectura arriba). Ejemplo:
 
 ```text
-> %xt%EmpireEx_25%cra%1%{"SX":738,"SY":250,"TX":737,"TY":251,"KID":0,"LID":3,"WT":0,"HBW":-1,"BPC":0,"ATT":0,"AV":0,"LP":0,"FC":0,"PTT":1,"SD":0,"ICA":0,"CD":99,"A":[{"L":{"T":[[-1,0],[-1,0]],"U":[[215,70],[-1,0]]},"R":{"T":[[-1,0],[-1,0]],"U":[[-1,0],[-1,0]]},"M":{"T":[[-1,0],[-1,0],[-1,0]],"U":[[-1,0],[-1,0],[-1,0],[-1,0],[-1,0],[-1,0]]}}],"BKS":[],"AST":[-1,-1,-1],"RW":[[-1,0],[-1,0],[-1,0],[-1,0],[-1,0],[-1,0],[-1,0],[-1,0]],"ASCT":0}
+> %xt%EmpireEx_25%cra%1%{"SX":738,"SY":250,"TX":737,"TY":251,"KID":0,"LID":3,...}
 [SENT] [CMD] xt%EmpireEx_25%cra%1 (cra) (dict keys=['SX', 'SY', 'TX', ...])
 {
   "SX": 738,
@@ -268,7 +294,7 @@ EN: The number after `EmpireEx_` (e.g. `EmpireEx_25`) is the **game server ident
 
 If you switch servers (log into a different zone), the number changes and any frame you replay must be updated accordingly. The current value is visible in every `[RECV]` frame on the terminal and in `/tmp/gge_decoded.log`.
 
-ES: El numero despues de `EmpireEx_` (ej. `EmpireEx_25`) es el **identificador del servidor de juego**, no un token de sesion. Corresponde a la zona a la que estas conectado (`EmpireEx_25` es `his1`, por ejemplo). **No** cambia entre logins ni reconexiones mientras sigas en el mismo servidor. Un frame guardado hoy sigue funcionando mañana contra el mismo servidor, byte por byte.
+ES: El numero despues de `EmpireEx_` (ej. `EmpireEx_25`) es el **identificador del servidor de juego**, no un token de sesion. Corresponde a la zona a la que estas conectado (`EmpireEx_25` es `his1`, por ejemplo). **No** cambia entre logins ni reconexiones mientras sigas en el mismo servidor. Un frame guardado hoy sigue funcionando manana contra el mismo servidor, byte por byte.
 
 Si cambias de servidor (logueas a otra zona), el numero cambia y cualquier frame que reproduzcas tiene que actualizarse en consecuencia. El valor actual se ve en cada frame `[RECV]` en la terminal y en `/tmp/gge_decoded.log`.
 
@@ -288,14 +314,149 @@ ES: Juga el juego normalmente. Cada clic que produce una peticion de red aparece
 
 ---
 
+## HTTP Bridge / Puente HTTP
+
+EN: `lib/bridge_server.py` exposes an `empire-api`-compatible REST API on top of the CDP relay. Any consumer that already speaks to `empire-api` (a backend, a scraper, a Postman collection) can point at the bridge instead and get full session context, because the frames are injected into a real Chrome session that is already logged into the game.
+
+ES: `lib/bridge_server.py` expone una API REST compatible con `empire-api` sobre el relay CDP. Cualquier consumidor que ya hable con `empire-api` (un backend, un scraper, una coleccion de Postman) puede apuntar al puente y obtener contexto de sesion completo, porque los frames se inyectan en una sesion real de Chrome que ya esta logueada al juego.
+
+### Why it matters / Por que importa
+
+EN: The public `empire-api` fork works with anonymous WebSocket sessions. Commands that require a session in the world (any interaction with the map, with a castle's interior, or with events) **time out** against it:
+
+| Command | Public empire-api | This bridge |
+|---|---|---|
+| `hgh` (rankings) | works | works |
+| `gdi` (player info) | works | works |
+| `ain` (alliance info) | works | works |
+| `jca` (castle analysis) | **timeout** | **works** |
+| `gaa` (map areas: dungeons, storm) | **timeout** | **works** |
+| `gpi` (own player info) | **404** | **works** |
+
+ES: El fork publico de `empire-api` funciona con sesiones WebSocket anonimas. Los comandos que requieren una sesion en el mundo (cualquier interaccion con el mapa, con el interior de un castillo, o con eventos) **dan timeout** contra el:
+
+| Comando | empire-api publico | Este puente |
+|---|---|---|
+| `hgh` (rankings) | funciona | funciona |
+| `gdi` (info de jugador) | funciona | funciona |
+| `ain` (info de alianza) | funciona | funciona |
+| `jca` (castle analysis) | **timeout** | **funciona** |
+| `gaa` (map areas: dungeons, storm) | **timeout** | **funciona** |
+| `gpi` (info del jugador propio) | **404** | **funciona** |
+
+### Endpoints / Endpoints
+
+EN: The bridge mirrors the `empire-api` URL shape: `GET /<zone>/<command>/<params>`. `<params>` is the exact JSON body, URL-encoded, minus the outer braces (same as `empire-api`). Examples:
+
+ES: El puente refleja la forma de URL de `empire-api`: `GET /<zone>/<command>/<params>`. `<params>` es el cuerpo JSON exacto, URL-encoded, sin las llaves externas (igual que `empire-api`). Ejemplos:
+
+```sh
+# Health check
+curl -s 'http://localhost:4444/'
+
+# Rankings (highscore)
+curl -s 'http://localhost:4444/EmpireEx_25/hgh/"LT":6,"LID":1,"SV":"1"'
+
+# Player info
+curl -s 'http://localhost:4444/EmpireEx_25/gdi/"PID":8105340'
+
+# Castle analysis (this is the one that fails against public empire-api)
+curl -s 'http://localhost:4444/EmpireEx_25/jca/"CID":8020182,"KID":0'
+
+# Map area (dungeons / storm)
+curl -s 'http://localhost:4444/EmpireEx_25/gaa/"KID":2,"AX1":0,"AY1":0,"AX2":100,"AY2":100'
+```
+
+### Response format / Formato de respuesta
+
+EN: Responses are wrapped in the same envelope `empire-api` uses:
+
+```json
+{
+  "server": "EmpireEx_25",
+  "command": "<answered-as command>",
+  "return_code": 0,
+  "content": { ... }
+}
+```
+
+ES: Las respuestas se envuelven en el mismo sobre que usa `empire-api`:
+
+```json
+{
+  "server": "EmpireEx_25",
+  "command": "<comando respondido>",
+  "return_code": 0,
+  "content": { ... }
+}
+```
+
+EN: When the request command and the response command differ, `ANSWERED_AS` maps them (same map `empire-api` uses; currently `jca` -> `jaa`). On timeout, the bridge answers HTTP 504 with `return_code: -1` and the original `response_headers`, so the consumer can retry.
+
+ES: Cuando el comando pedido y el comando de respuesta difieren, `ANSWERED_AS` los mapea (mismo mapa que usa `empire-api`; actualmente `jca` -> `jaa`). En timeout, el puente responde HTTP 504 con `return_code: -1` y los `response_headers` originales, para que el consumidor pueda reintentar.
+
+### How a request flows / Como viaja una peticion
+
+```text
+GET /EmpireEx_25/jca/"CID":8020182,"KID":0
+  -> bridge parses zone=EmpireEx_25, cmd=jca, body={"CID":8020182,"KID":0}
+  -> builds raw frame: %xt%EmpireEx_25%jca%1%{"CID":8020182,"KID":0}%
+  -> relay.send_to_game(frame) via Runtime.evaluate on the hooked WS
+  -> Chrome sends the frame over the native WS to Goodgame
+  -> Goodgame responds with %xt%...jaa%1%{...}%
+  -> CDP emits Network.webSocketFrameReceived
+  -> decoder parses cmd="jaa", body={...}
+  -> decoder notifies bridge.handle_response("jaa", body)
+  -> the pending Event is set, HTTP handler wakes up
+  -> HTTP 200 with { server, command: "jaa", return_code: 0, content: body }
+```
+
+### Wiring a consumer / Conectando un consumidor
+
+EN: Point `GGE_API_URL` and `GGE_API_URL_REALTIME` at the bridge instead of `empire-api`:
+
+ES: Apunta `GGE_API_URL` y `GGE_API_URL_REALTIME` al puente en vez de a `empire-api`:
+
+```env
+# When the consumer runs in Docker and the bridge runs on the host,
+# use the docker bridge gateway IP:
+GGE_API_URL=http://172.19.0.1:4444
+GGE_API_URL_REALTIME=http://172.19.0.1:4444
+```
+
+EN: Get the gateway IP with:
+
+ES: Obtene la IP del gateway con:
+
+```sh
+docker network inspect backend --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}'
+```
+
+EN: If the consumer runs on the same host (not in Docker), use `http://localhost:4444` directly.
+
+ES: Si el consumidor corre en el mismo host (no en Docker), usa `http://localhost:4444` directamente.
+
+### Constraints / Restricciones
+
+EN: The bridge currently does **not** pipeline concurrent requests for the same response command. Since EmpireEx frames have no request id, the bridge cannot tell two in-flight `jca` requests apart. A second request for the same answered-as command while one is pending gets HTTP 429. In practice this is fine: the tracker scrapers are single-threaded per server.
+
+ES: El puente actualmente **no** pipelina peticiones concurrentes para el mismo comando de respuesta. Como los frames EmpireEx no traen request id, el puente no puede distinguir dos `jca` en vuelo. Una segunda peticion para el mismo comando respondido mientras hay una pendiente devuelve HTTP 429. En la practica no molesta: los scrapers del tracker son monohilo por servidor.
+
+EN: **Chrome must stay open and logged in.** If Chrome closes, if the session expires, or if the game tab is closed, every request through the bridge will time out until Chrome is reopened and re-logged.
+
+ES: **Chrome tiene que quedar abierto y logueado.** Si Chrome se cierra, si la sesion expira, o si la pestaña del juego se cierra, toda peticion a traves del puente va a dar timeout hasta que se reabra Chrome y se vuelva a loguear.
+
+---
+
 ## Files / Archivos
 
 | File | Purpose (EN) | Proposito (ES) |
 |---|---|---|
-| `main.py` | Entry point and REPL loop | Punto de entrada y bucle REPL |
+| `main.py` | Entry point and REPL loop, starts the bridge | Punto de entrada y bucle REPL, arranca el puente |
 | `lib/cdp_relay.py` | Chrome DevTools Protocol client | Cliente del Chrome DevTools Protocol |
 | `lib/empire_decoder.py` | EmpireEx base64 decoder and formatter | Decodificador base64 y formateador EmpireEx |
 | `lib/gge_browser_selenium.py` | Launches Chrome, wires the relay | Lanza Chrome y conecta el relay |
+| `lib/bridge_server.py` | Flask HTTP bridge (`empire-api` compatible) | Puente HTTP Flask (compatible con `empire-api`) |
 | `lib/gge_socket_browser.py` | Legacy callback container | Contenedor de callbacks legado |
 | `lib/websocket_server.py` | Legacy WS proxy (unused) | Proxy WS legado (no usado) |
 | `lib/colors.py` | ANSI color codes | Codigos ANSI de color |
@@ -404,6 +565,44 @@ Si en cambio ves `NO_WS_YET list=0 []`, el hook todavia no capturo nada.
 
 ---
 
+**EN: Bridge returns `{"error": "Timeout", "return_code": -1}`**
+
+The bridge sent the frame but no matching `RECV` arrived within `timeout` seconds. Common causes:
+
+1. **Session expired in Chrome.** Re-login in the Chrome tab. The relay stays connected but the server rejects commands.
+2. **The `CID` belongs to a different kingdom.** Castle ids (`CID`) are kingdom-specific. `jca/"CID":X,"KID":0` and `jca/"CID":X,"KID":2` are two different castles; use the one the game shows when you click the castle in question.
+3. **Command requires a state you are not in.** For example, `gaa` on a kingdom the current session has not entered will not answer until you enter it manually in the browser once.
+
+**ES: El puente devuelve `{"error": "Timeout", "return_code": -1}`**
+
+El puente envio el frame pero no llego ningun `RECV` que matchee dentro de `timeout` segundos. Causas comunes:
+
+1. **Sesion expirada en Chrome.** Volve a loguearte en la pestaña de Chrome. El relay sigue conectado pero el servidor rechaza los comandos.
+2. **El `CID` pertenece a otro reino.** Los ids de castillo (`CID`) son especificos por reino. `jca/"CID":X,"KID":0` y `jca/"CID":X,"KID":2` son dos castillos distintos; usa el que el juego muestra cuando haces clic en el castillo en cuestion.
+3. **El comando requiere un estado en el que no estas.** Por ejemplo, `gaa` sobre un reino al que la sesion actual no entro no va a responder hasta que entres manualmente una vez desde el navegador.
+
+---
+
+**EN: Bridge returns `{"error": "Relay not ready (Chrome not logged in yet)"}`**
+
+The bridge is up but the CDP relay has not connected yet. Wait for `[PY] CDP relay active.` in the terminal. If it never appears, see the "Game stuck" section above.
+
+**ES: El puente devuelve `{"error": "Relay not ready (Chrome not logged in yet)"}`**
+
+El puente esta arriba pero el relay CDP todavia no conecto. Espera a `[PY] CDP relay active.` en la terminal. Si nunca aparece, mira la seccion "Juego atascado" arriba.
+
+---
+
+**EN: Bridge returns HTTP 429 `{"error": "Another request for this command is in flight"}`**
+
+The consumer is sending two concurrent requests for the same response command. Serialize them, or give the bridge a bigger `timeout` so the first one finishes before the second starts.
+
+**ES: El puente devuelve HTTP 429 `{"error": "Another request for this command is in flight"}`**
+
+El consumidor esta mandando dos peticiones concurrentes para el mismo comando de respuesta. Serializalas, o dale al puente un `timeout` mas grande para que la primera termine antes de que arranque la segunda.
+
+---
+
 ## Platform notes / Notas de plataforma
 
 EN: The current code was developed and tested on Linux. macOS works out of the box. Windows works but needs three small adjustments:
@@ -452,9 +651,9 @@ taskkill /F /IM chrome.exe
 rmdir /S /Q user-data
 ```
 
-EN: **Linux-only features:** none. The hook mechanism, CDP relay, decoder and REPL all work identically on every platform once the adjustments above are applied.
+EN: **Linux-only features:** none. The hook mechanism, CDP relay, decoder, HTTP bridge and REPL all work identically on every platform once the adjustments above are applied.
 
-ES: **Funciones solo-Linux:** ninguna. El mecanismo del hook, el relay CDP, el decoder y el REPL funcionan igual en cualquier plataforma una vez aplicados los ajustes de arriba.
+ES: **Funciones solo-Linux:** ninguna. El mecanismo del hook, el relay CDP, el decoder, el puente HTTP y el REPL funcionan igual en cualquier plataforma una vez aplicados los ajustes de arriba.
 
 ---
 
@@ -468,6 +667,10 @@ ES: Este fork no usa `--disable-web-security`. Chrome habla con Goodgame con su 
 
 **ES: Nunca hagas commit de `user-data/`.** Contiene cookies de sesion de tu cuenta de Goodgame.
 
+**EN: The HTTP bridge binds to `0.0.0.0` by default.** If the host is reachable from an untrusted network, anyone on that network can inject commands into your game session. Bind to `127.0.0.1` if you only need local access, or firewall the port.
+
+**ES: El puente HTTP se bindea a `0.0.0.0` por defecto.** Si el host es alcanzable desde una red no confiable, cualquiera en esa red puede inyectar comandos en tu sesion de juego. Bindea a `127.0.0.1` si solo necesitas acceso local, o bloquea el puerto en el firewall.
+
 **EN: Terms of Service.** Goodgame Studios' ToS prohibit automation, bots, and external tools that interact with the game. This project is provided for educational and interoperability research purposes only. Using it on a live account may result in warnings, temporary suspension or a permanent ban. You assume all risk.
 
 **ES: Terminos de Servicio.** Los ToS de Goodgame Studios prohiben la automatizacion, los bots y las herramientas externas que interactuen con el juego. Este proyecto se provee solo con fines educativos y de investigacion de interoperabilidad. Usarlo en una cuenta activa puede resultar en advertencias, suspension temporal o ban permanente. Asumis todo el riesgo.
@@ -476,9 +679,13 @@ ES: Este fork no usa `--disable-web-security`. Chrome habla con Goodgame con su 
 
 ## Credits / Creditos
 
-EN: Original project by [danadum](https://github.com/danadum). Chrome 155+ compatibility (CDP relay), EmpireEx decoder and passive WebSocket hook added by [Synapse-VE](https://github.com/Synapse-VE).
+EN: Original project by [danadum](https://github.com/danadum). Chrome 155+ compatibility (CDP relay), EmpireEx decoder, passive WebSocket hook and HTTP bridge added by [Synapse-VE](https://github.com/Synapse-VE).
 
-ES: Proyecto original de [danadum](https://github.com/danadum). Compatibilidad con Chrome 155+ (relay CDP), decoder EmpireEx y hook pasivo del WebSocket agregados por [Synapse-VE](https://github.com/Synapse-VE).
+EN: The HTTP bridge is designed to be compatible with [gge-tracker](https://github.com/gge-tracker/gge-tracker) — the public tracker project for Goodgame Empire. Pointing its `GGE_API_URL` at this bridge unlocks commands (`jca`, `gaa`, `gpi`) that time out against the public `empire-api` fork.
+
+ES: Proyecto original de [danadum](https://github.com/danadum). Compatibilidad con Chrome 155+ (relay CDP), decoder EmpireEx, hook pasivo del WebSocket y puente HTTP agregados por [Synapse-VE](https://github.com/Synapse-VE).
+
+ES: El puente HTTP esta diseñado para ser compatible con [gge-tracker](https://github.com/gge-tracker/gge-tracker) — el proyecto publico de tracker para Goodgame Empire. Apuntar su `GGE_API_URL` a este puente desbloquea comandos (`jca`, `gaa`, `gpi`) que dan timeout contra el fork publico de `empire-api`.
 
 ---
 
