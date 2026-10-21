@@ -31,23 +31,87 @@ def _print_preserving_input(message):
 def open_browser(game_url):
     """
     EN: Launch Chrome with the flags required for CDP relay.
-    ES: Lanza Chrome con las flags requeridas para el relay CDP.
+        Reads configuration from env vars so it can run as a service:
+          - GGE_HEADLESS=1       : run Chrome without GUI (default: 1)
+          - GGE_WINDOW_SIZE      : window size for headless (default: 1920,1080)
+          - GGE_USER_DATA_DIR    : Chrome profile dir (default: ./user-data)
+          - GGE_DETACH=0         : do NOT detach Chrome from Python
+                                   (default: 1 for interactive use)
+          - GGE_CHROME_BINARY    : optional path to chrome binary
+    ES: Lanza Chrome con las flags necesarias para el relay CDP.
+        Lee configuracion de env vars para poder correr como servicio:
+          - GGE_HEADLESS=1       : corre Chrome sin GUI (default: 1)
+          - GGE_WINDOW_SIZE      : tamano de ventana para headless (default: 1920,1080)
+          - GGE_USER_DATA_DIR    : dir del perfil de Chrome (default: ./user-data)
+          - GGE_DETACH=0         : NO desacoplar Chrome de Python
+                                   (default: 1 para uso interactivo)
+          - GGE_CHROME_BINARY    : path opcional al binario de chrome
     """
     port = 9222
+
+    def _env_bool(name, default):
+        v = os.environ.get(name, "").strip().lower()
+        if v == "":
+            return default
+        return v in ("1", "true", "yes", "on")
+
+    headless = _env_bool("GGE_HEADLESS", False)
+    detach = _env_bool("GGE_DETACH", True)
+    window_size = os.environ.get("GGE_WINDOW_SIZE", "1920,1080")
+    user_data_dir = os.environ.get(
+        "GGE_USER_DATA_DIR",
+        os.path.join(os.getcwd(), "user-data"),
+    )
+    chrome_binary = os.environ.get("GGE_CHROME_BINARY", "").strip()
+
+    # EN: Ensure the profile dir exists before Chrome tries to use it.
+    # ES: Asegurar que el dir del perfil exista antes de que Chrome lo use.
+    os.makedirs(user_data_dir, exist_ok=True)
+
     options = webdriver.ChromeOptions()
-    options.add_argument("--start-maximized")
-    options.add_argument(f"--user-data-dir={os.path.join(os.getcwd(), 'user-data')}")
+
+    # Window mode
+    if headless:
+        # EN: --headless=new is the modern headless (Chrome 109+).
+        #     --disable-gpu and --disable-dev-shm-usage are needed on
+        #     servers without a GPU or with a small /dev/shm.
+        # ES: --headless=new es el headless moderno (Chrome 109+).
+        #     --disable-gpu y --disable-dev-shm-usage son necesarios en
+        #     servers sin GPU o con /dev/shm chico.
+        options.add_argument("--headless=new")
+        options.add_argument(f"--window-size={window_size}")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--disable-dev-shm-usage")
+    else:
+        options.add_argument("--start-maximized")
+
+    # Persistent profile + CDP
+    options.add_argument(f"--user-data-dir={user_data_dir}")
     options.add_argument(f"--remote-debugging-port={port}")
-    # EN: Required for Chrome to accept the CDP WebSocket connection.
-    # ES: Necesario para que Chrome acepte la conexion WebSocket al CDP.
     options.add_argument("--remote-allow-origins=*")
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
     options.add_argument("--disable-features=Translate")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option("detach", True)
+    options.add_argument("--disable-blink-features=AutomationControlled")
 
-    print("[PY] Launching Chrome... / Lanzando Chrome...", flush=True)
+    # EN: Reduce the "Chrome is being controlled by automated software"
+    #     banner and hide the automation flags.
+    # ES: Reduce el banner "Chrome is being controlled..." y oculta
+    #     las flags de automatizacion.
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+
+    if detach:
+        options.add_experimental_option("detach", True)
+
+    if chrome_binary:
+        options.binary_location = chrome_binary
+
+    print(
+        f"[PY] Launching Chrome (headless={headless}, detach={detach}, "
+        f"profile={user_data_dir})... / Lanzando Chrome...",
+        flush=True,
+    )
     driver = webdriver.Chrome(options=options)
     print(f"[PY] Chrome: {driver.capabilities.get('browserVersion')}", flush=True)
 

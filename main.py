@@ -9,6 +9,7 @@ ES: Punto de entrada. Lanza Chrome, conecta el relay CDP, arranca el
 
 import os
 import readline
+import signal
 import sys
 import time
 
@@ -43,6 +44,27 @@ def _rotate_logs():
             print(f"[!] rotate error on {path}: {e}", flush=True)
 
 
+def _install_signal_handlers():
+    """
+    EN: Handle SIGTERM / SIGINT cleanly so the process exits even when it
+        is not attached to a TTY (e.g. launched as a background job).
+        Without this, Ctrl+C in a TTY works but a `kill <pid>` or a
+        process supervisor's stop signal would be ignored, leaving
+        Chrome orphaned.
+    ES: Manejar SIGTERM / SIGINT para salir limpio aunque el proceso no
+        este atado a una TTY (ej. lanzado como job en background). Sin
+        esto, Ctrl+C en TTY anda pero un `kill <pid>` o la senal de stop
+        de un supervisor seria ignorada, dejando Chrome huerfano.
+    """
+    def _handle(signum, _frame):
+        name = signal.Signals(signum).name
+        print(f"\n[PY] Received {name}, exiting... / Recibido {name}, saliendo...", flush=True)
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _handle)
+    signal.signal(signal.SIGINT, _handle)
+
+
 def print_preserve_input(message):
     """
     EN: Print a message without losing the line currently being typed.
@@ -53,67 +75,13 @@ def print_preserve_input(message):
     sys.stdout.flush()
 
 
-if __name__ == '__main__':
-    # EN: Rotate oversized logs before importing anything that opens them.
-    #     empire_decoder now uses lazy-open (init_logs), so no file handle
-    #     exists until the first write. Rotation is effective.
-    # ES: Rotar logs gigantes antes de importar nada que los abra.
-    #     empire_decoder ahora usa apertura perezosa (init_logs), asi que
-    #     no existe ningun handle hasta la primera escritura. La rotacion
-    #     es efectiva.
-    _rotate_logs()
-
-    # EN: Callback container. In the CDP relay architecture this object
-    #     does not open a real WebSocket; it only holds callbacks.
-    #     on_send and on_message are intentionally None: the decoder in
-    #     gge_browser_selenium already prints every frame (raw is also
-    #     written to RAW_LOG / DECODED_LOG). Setting them here would
-    #     duplicate every line on the terminal.
-    # ES: Contenedor de callbacks. En la arquitectura de relay CDP este
-    #     objeto no abre un WebSocket real; solo guarda callbacks.
-    #     on_send y on_message quedan en None a proposito: el decoder en
-    #     gge_browser_selenium ya imprime cada frame (y ademas el crudo
-    #     va a RAW_LOG / DECODED_LOG). Setearlos aca duplicaria cada
-    #     linea en la terminal.
-    socket = GgeSocketBrowser(
-        on_send=None,
-        on_open=lambda ws: print_preserve_input(colors.LIGHT_MAGENTA + 'WebSocket opened' + colors.ENDC),
-        on_message=None,
-        on_error=lambda ws, error: print_preserve_input(colors.LIGHT_RED + f"Error in websocket: {error}" + colors.ENDC),
-        on_close=lambda ws, close_status_code, close_msg: print_preserve_input(colors.LIGHT_MAGENTA + f'WebSocket closed with code {close_status_code} and message {close_msg}' + colors.ENDC),
-    )
-
-    # EN: Start the HTTP bridge. It picks up the relay once Chrome is
-    #     connected (the socket exposes .cdp_relay dynamically), so it is
-    #     safe to start before connect_with_browser().
-    # ES: Arrancar el puente HTTP. Toma el relay una vez que Chrome este
-    #     conectado (el socket expone .cdp_relay dinamicamente), asi que
-    #     es seguro arrancarlo antes de connect_with_browser().
-    bridge = BridgeServer(socket, host="0.0.0.0", port=4444, timeout=15.0)
-    empire_decoder.set_response_callback(bridge.handle_response)
-    bridge.start()
-    print(
-        "[PY] Bridge HTTP listening on / Escuchando en http://0.0.0.0:4444",
-        flush=True,
-    )
-
-    # EN: Launch Chrome and start the CDP relay.
-    #     To target a non-GGS host, pass game_domain="your.host.com".
-    # ES: Lanza Chrome y arranca el relay CDP.
-    #     Para apuntar a un host que no sea GGS, pasar game_domain="tu.host".
-    connect_with_browser(
-        socket,
-        'https://danadum.github.io/empire',
-        8765,
-        # game_domain="empire-html5.goodgamestudios.com",
-    )
-
-    # EN: REPL loop. Whatever is typed here is forwarded to the game via CDP.
-    #     Special local commands (starting with '/') are handled here and
-    #     not forwarded to the game.
-    # ES: Bucle REPL. Lo que se escriba aca se reenvia al juego via CDP.
-    #     Los comandos locales (que empiezan con '/') se manejan aca y
-    #     no se reenvian al juego.
+def _run_repl(socket):
+    """
+    EN: Interactive REPL. Reads commands from stdin and forwards them to
+        the game via CDP. Only runs when stdin is a TTY.
+    ES: REPL interactivo. Lee comandos de stdin y los reenvia al juego
+        via CDP. Solo corre cuando stdin es una TTY.
+    """
     while True:
         try:
             msg = input("> ")
@@ -163,3 +131,106 @@ if __name__ == '__main__':
             #     cuando el CDP lo captura. Evita una linea duplicada.
         except Exception as e:
             print(f"[!] Error: {e}")
+
+
+def _wait_for_signals():
+    """
+    EN: Block the main thread until a signal arrives. Used in background
+        mode (stdin is not a TTY), where there is no REPL. The process
+        stays alive serving the HTTP bridge until SIGTERM / SIGINT.
+    ES: Bloquea el hilo principal hasta que llegue una senal. Se usa en
+        modo background (stdin no es TTY), donde no hay REPL. El proceso
+        queda vivo sirviendo el puente HTTP hasta SIGTERM / SIGINT.
+    """
+    print(
+        "[PY] stdin is not a TTY: running in background mode. "
+        "Send SIGTERM or SIGINT to stop.",
+        flush=True,
+    )
+    print(
+        "[PY] stdin no es TTY: modo background. Enviar SIGTERM o SIGINT "
+        "para detener.",
+        flush=True,
+    )
+    # EN: signal.pause() blocks until any signal is delivered. Our
+    #     SIGTERM/SIGINT handlers call sys.exit(0), so this returns
+    #     cleanly.
+    # ES: signal.pause() bloquea hasta que llegue cualquier senal.
+    #     Nuestros handlers de SIGTERM/SIGINT llaman a sys.exit(0), asi
+    #     que esto retorna limpio.
+    while True:
+        signal.pause()
+
+
+if __name__ == '__main__':
+    # EN: Rotate oversized logs before importing anything that opens them.
+    #     empire_decoder now uses lazy-open (init_logs), so no file handle
+    #     exists until the first write. Rotation is effective.
+    # ES: Rotar logs gigantes antes de importar nada que los abra.
+    #     empire_decoder ahora usa apertura perezosa (init_logs), asi que
+    #     no existe ningun handle hasta la primera escritura. La rotacion
+    #     es efectiva.
+    _rotate_logs()
+
+    # EN: Install SIGTERM / SIGINT handlers so the process can be stopped
+    #     cleanly from outside a TTY.
+    # ES: Instalar handlers de SIGTERM / SIGINT para poder frenar el
+    #     proceso limpiamente desde fuera de una TTY.
+    _install_signal_handlers()
+
+    # EN: Callback container. In the CDP relay architecture this object
+    #     does not open a real WebSocket; it only holds callbacks.
+    #     on_send and on_message are intentionally None: the decoder in
+    #     gge_browser_selenium already prints every frame (raw is also
+    #     written to RAW_LOG / DECODED_LOG). Setting them here would
+    #     duplicate every line on the terminal.
+    # ES: Contenedor de callbacks. En la arquitectura de relay CDP este
+    #     objeto no abre un WebSocket real; solo guarda callbacks.
+    #     on_send y on_message quedan en None a proposito: el decoder en
+    #     gge_browser_selenium ya imprime cada frame (y ademas el crudo
+    #     va a RAW_LOG / DECODED_LOG). Setearlos aca duplicaria cada
+    #     linea en la terminal.
+    socket = GgeSocketBrowser(
+        on_send=None,
+        on_open=lambda ws: print_preserve_input(colors.LIGHT_MAGENTA + 'WebSocket opened' + colors.ENDC),
+        on_message=None,
+        on_error=lambda ws, error: print_preserve_input(colors.LIGHT_RED + f"Error in websocket: {error}" + colors.ENDC),
+        on_close=lambda ws, close_status_code, close_msg: print_preserve_input(colors.LIGHT_MAGENTA + f'WebSocket closed with code {close_status_code} and message {close_msg}' + colors.ENDC),
+    )
+
+    # EN: Start the HTTP bridge. It picks up the relay once Chrome is
+    #     connected (the socket exposes .cdp_relay dynamically), so it is
+    #     safe to start before connect_with_browser().
+    # ES: Arrancar el puente HTTP. Toma el relay una vez que Chrome este
+    #     conectado (el socket expone .cdp_relay dinamicamente), asi que
+    #     es seguro arrancarlo antes de connect_with_browser().
+    bridge = BridgeServer(socket, host="0.0.0.0", port=4444, timeout=15.0)
+    empire_decoder.set_response_callback(bridge.handle_response)
+    bridge.start()
+    print(
+        "[PY] Bridge HTTP listening on / Escuchando en http://0.0.0.0:4444",
+        flush=True,
+    )
+
+    # EN: Launch Chrome and start the CDP relay.
+    #     To target a non-GGS host, pass game_domain="your.host.com".
+    # ES: Lanza Chrome y arranca el relay CDP.
+    #     Para apuntar a un host que no sea GGS, pasar game_domain="tu.host".
+    connect_with_browser(
+        socket,
+        'https://danadum.github.io/empire',
+        8765,
+        # game_domain="empire-html5.goodgamestudios.com",
+    )
+
+    # EN: If stdin is a TTY, run the interactive REPL. Otherwise (nohup,
+    #     systemd, background job) just wait for a signal. This is what
+    #     makes GGE_DETACH=0 + nohup work without crashing on input().
+    # ES: Si stdin es TTY, correr el REPL interactivo. Si no (nohup,
+    #     systemd, job en background) solo esperar una senal. Esto es lo
+    #     que hace que GGE_DETACH=0 + nohup funcione sin crashear en
+    #     input().
+    if sys.stdin.isatty():
+        _run_repl(socket)
+    else:
+        _wait_for_signals()
