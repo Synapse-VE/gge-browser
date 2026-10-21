@@ -68,6 +68,18 @@ class CdpRelay:
         # EN: Stores the last connection error so connect() can raise it.
         # ES: Guarda el ultimo error de conexion para que connect() lo lance.
         self._connect_error = None
+        # EN: Set by close() to stop the watchdog. / ES: Lo setea close() para frenar el watchdog.
+        self._stopped = threading.Event()
+        # EN: Guards the reconnect flag so only one watchdog attempt runs.
+        # ES: Protege el flag de reconexion para que corra un solo intento.
+        self._reconnect_lock = threading.Lock()
+        self._reconnecting = False
+        # EN: Watchdog thread that reconnects when the CDP socket dies
+        #     (the game iframe navigates and the target is recreated).
+        # ES: Hilo watchdog que reconecta cuando muere el socket CDP
+        #     (el iframe del juego navega y el target se recrea).
+        self._watchdog = None
+        self._watchdog_lock = threading.Lock()
 
     def _find_target(self):
         """
@@ -113,36 +125,59 @@ class CdpRelay:
             # ES: Resetear el estado por intento para que una senal vieja
             #     del intento anterior no se filtre a este.
             self._connected.clear()
+            self._hooked.clear()
             self._connect_error = None
+            self.game_ws_request_id = None
 
-            self.ws = websocket.WebSocketApp(
+            # EN: Keep a local reference: self.ws may be replaced by a
+            #     reconnect attempt before this thread starts running.
+            # ES: Guardar una referencia local: self.ws puede ser
+            #     reemplazado por un intento de reconexion antes de que
+            #     este hilo arranque.
+            ws_app = websocket.WebSocketApp(
                 url,
                 on_open=self._on_open,
                 on_message=self._on_message,
                 on_error=self._on_error_ws,
                 on_close=self._on_close,
             )
+            self.ws = ws_app
 
-            def _run():
+            def _run(app=ws_app):
                 # EN: suppress_origin is required because Chrome rejects any
                 #     Origin header that is not whitelisted via --remote-allow-origins.
                 # ES: suppress_origin es necesario porque Chrome rechaza cualquier
                 #     header Origin que no este permitido con --remote-allow-origins.
-                self.ws.run_forever(suppress_origin=True)
+                app.run_forever(suppress_origin=True)
 
             threading.Thread(target=_run, daemon=True).start()
 
             if not self._connected.wait(timeout=timeout):
                 last_err = "Connection timeout / Timeout de conexion"
+                try:
+                    ws_app.close()
+                except Exception:
+                    pass
+                if self.ws is ws_app:
+                    self.ws = None
                 continue
 
             if not self._connect_error:
-                # EN: Success.
-                # ES: Exito.
+                # EN: Success. Start the watchdog once; it will notice
+                #     later drops and reconnect on its own.
+                # ES: Exito. Arrancar el watchdog una vez; el va a notar
+                #     las caidas posteriores y reconectar solo.
+                self._start_watchdog()
                 return
 
             last_err = self._connect_error
             err_str = str(last_err)
+            try:
+                ws_app.close()
+            except Exception:
+                pass
+            if self.ws is ws_app:
+                self.ws = None
 
             # EN: Transient failures: the iframe was still navigating and
             #     the target id we picked is stale. Retry. Everything else
@@ -177,6 +212,87 @@ class CdpRelay:
         """
         return self._hooked.wait(timeout=timeout)
 
+    def _is_ws_alive(self):
+        """
+        EN: True when the CDP WebSocket is open.
+        ES: True cuando el WebSocket CDP esta abierto.
+        """
+        ws = self.ws
+        if ws is None:
+            return False
+        sock = getattr(ws, "sock", None)
+        return bool(sock is not None and getattr(sock, "connected", False))
+
+    def _start_watchdog(self):
+        """
+        EN: Start the reconnect watchdog once. Idempotent.
+        ES: Arranca el watchdog de reconexion una vez. Idempotente.
+        """
+        with self._watchdog_lock:
+            if self._watchdog is not None and self._watchdog.is_alive():
+                return
+            self._watchdog = threading.Thread(
+                target=self._watchdog_loop,
+                daemon=True,
+                name="cdp-watchdog",
+            )
+            self._watchdog.start()
+
+    def _watchdog_loop(self):
+        """
+        EN: Every couple of seconds, check the CDP socket. When it dies
+            (the game iframe navigated and Chrome dropped the session),
+            reconnect to the new target and reinstall Network + Runtime.
+        ES: Cada un par de segundos revisa el socket CDP. Cuando muere
+            (el iframe del juego navego y Chrome cerro la sesion),
+            reconecta al nuevo target y reinstala Network + Runtime.
+        """
+        while not self._stopped.wait(2.0):
+            if self._is_ws_alive():
+                continue
+
+            with self._reconnect_lock:
+                if self._reconnecting:
+                    continue
+                self._reconnecting = True
+
+            try:
+                print(
+                    "[CDP] Connection lost, reconnecting... / "
+                    "Conexion perdida, reconectando...",
+                    flush=True,
+                )
+                self.connect(timeout=10, retries=1)
+                if self.wait_ready(timeout=10):
+                    print("[CDP] Relay reconnected. / Relay reconectado.", flush=True)
+                else:
+                    print(
+                        "[CDP] Reconnected, hook not ready yet. / "
+                        "Reconectado, hook todavia no listo.",
+                        flush=True,
+                    )
+            except Exception as e:
+                print(f"[CDP] Reconnect failed / Fallo al reconectar: {e}", flush=True)
+            finally:
+                with self._reconnect_lock:
+                    self._reconnecting = False
+
+            self._stopped.wait(1.0)
+
+    def close(self):
+        """
+        EN: Stop the watchdog and close the CDP socket. Idempotent.
+        ES: Frena el watchdog y cierra el socket CDP. Idempotente.
+        """
+        self._stopped.set()
+        ws = self.ws
+        self.ws = None
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
     def _send_cdp(self, method, params=None):
         """
         EN: Send a raw CDP command to Chrome. Serialized under self.lock
@@ -184,6 +300,8 @@ class CdpRelay:
         ES: Envia un comando CDP crudo a Chrome. Serializado bajo self.lock
             porque Runtime.evaluate y el hook pueden competir.
         """
+        if not self._is_ws_alive():
+            raise RuntimeError("[CDP] Relay not connected / Relay no conectado")
         with self.lock:
             self.msg_id += 1
             mid = self.msg_id
@@ -194,6 +312,16 @@ class CdpRelay:
             self.ws.send(json.dumps(cmd))
 
     def _on_open(self, ws):
+        # EN: Ignore callbacks from a socket that was already replaced by
+        #     a reconnect attempt.
+        # ES: Ignorar callbacks de un socket que ya fue reemplazado por
+        #     un intento de reconexion.
+        if ws is not self.ws:
+            try:
+                ws.close()
+            except Exception:
+                pass
+            return
         # EN: Enable Network (for WS frame events) and Runtime (for
         #     Runtime.evaluate, used to inject commands).
         # ES: Habilita Network (para eventos de frames WS) y Runtime (para
@@ -258,6 +386,8 @@ class CdpRelay:
         self._send_cdp("Runtime.evaluate", {"expression": expr, "returnByValue": True})
 
     def _on_message(self, ws, message):
+        if ws is not self.ws:
+            return
         try:
             data = json.loads(message)
         except Exception:
@@ -336,6 +466,8 @@ class CdpRelay:
                 self.on_frame_sent(payload)
 
     def _on_error_ws(self, ws, error):
+        if ws is not self.ws:
+            return
         print(f"[CDP] Error: {error}", flush=True)
         self._connect_error = error
         # EN: Unblock connect() even on failure, so it can raise fast
@@ -347,7 +479,19 @@ class CdpRelay:
             self.on_error(error)
 
     def _on_close(self, ws, code, msg):
+        if ws is not self.ws:
+            return
         print(f"[CDP] Closed / Cerrado: {code} {msg}", flush=True)
+        if self._connect_error is None:
+            self._connect_error = RuntimeError(f"CDP connection closed ({code})")
+        # EN: Unblock a connect() that may be waiting on this attempt.
+        # ES: Desbloquear un connect() que pueda estar esperando este intento.
+        self._connected.set()
+        if not self._stopped.is_set():
+            print(
+                "[CDP] Watchdog will reconnect. / El watchdog va a reconectar.",
+                flush=True,
+            )
 
     def send_to_game(self, data):
         """
