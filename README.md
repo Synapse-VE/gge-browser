@@ -448,6 +448,30 @@ ES: **Chrome tiene que quedar abierto y logueado.** Si Chrome se cierra, si la s
 
 ---
 
+## Offers scraper / Scraper de ofertas
+
+EN: `offers_scraper.py` is a read-only companion for the in-game **Vista general de ofertas** panel. It attaches to the Chrome instance that `main.py` already has open (CDP port 9222), reads the offer slots and their VOs, opens/closes the detail dialogs with real Selenium clicks when needed, and cross-references the `sei` events and the public items catalog. It does not launch another browser, buy anything, or claim rewards.
+
+ES: `offers_scraper.py` es un complemento de solo lectura para el panel **Vista general de ofertas** del juego. Se engancha al Chrome que ya abrio `main.py` (CDP puerto 9222), lee los slots y sus VO, abre/cierra los dialogos de detalle con clicks reales de Selenium cuando hace falta, y cruza los eventos `sei` con el catalogo publico de items. No lanza otro navegador, no compra nada ni reclama recompensas.
+
+```sh
+.venv/bin/python offers_scraper.py            # panel + VOs
+.venv/bin/python offers_scraper.py --details  # + dialogos (Selenium)
+.venv/bin/python offers_scraper.py --events   # eventos sei (carrito, buildings, prime)
+.venv/bin/python offers_scraper.py --json     # crudo
+.venv/bin/python offers_scraper.py --watch 5  # nuevas/cerradas
+```
+
+EN: `--details` opens every offer that has no VO content, reads title/description/price/discount/timer, and closes it with a real click. The shopping cart is resolved against `items_v<version>.json`; the exact level/lifetime-spent variant is inferred from the quantities shown in the cart dialog. The GGS gift is skipped on purpose: clicking it claims the gift.
+
+ES: `--details` abre cada oferta sin contenido en el VO, lee titulo/descripcion/precio/descuento/timer y la cierra con un click real. El carrito se resuelve contra `items_v<version>.json`; la variante exacta de nivel/gasto se infiere de las cantidades que muestra el dialogo. El regalo GGS se saltea a proposito: su click reclama el regalo.
+
+EN: First run downloads `items_v<version>.json` (~19 MB) into `.gge-cache/` (gitignored). Full design, shop API notes and limitations: [OFFERS_SCRAPER.md](OFFERS_SCRAPER.md).
+
+ES: La primera corrida descarga `items_v<version>.json` (~19 MB) en `.gge-cache/` (ignorado por git). Diseno completo, notas de la API del shop y limitaciones: [OFFERS_SCRAPER.md](OFFERS_SCRAPER.md).
+
+---
+
 ## Files / Archivos
 
 | File | Purpose (EN) | Proposito (ES) |
@@ -460,6 +484,10 @@ ES: **Chrome tiene que quedar abierto y logueado.** Si Chrome se cierra, si la s
 | `lib/gge_socket_browser.py` | Legacy callback container | Contenedor de callbacks legado |
 | `lib/websocket_server.py` | Legacy WS proxy (unused) | Proxy WS legado (no usado) |
 | `lib/colors.py` | ANSI color codes | Codigos ANSI de color |
+| `offers_scraper.py` | Read-only offers panel scraper | Scraper de solo lectura del panel de ofertas |
+| `gge_catalog.py` | Public items catalog + cart/event formatters | Catalogo publico de items + formateadores de carrito/eventos |
+| `gge_events.py` | `sei` events via CDP + log fallback | Eventos `sei` por CDP + fallback al log |
+| `OFFERS_SCRAPER.md` | Offers scraper design and usage | Diseno y uso del scraper de ofertas |
 
 Runtime artifacts (not part of the repository / no forman parte del repositorio):
 
@@ -469,6 +497,7 @@ Runtime artifacts (not part of the repository / no forman parte del repositorio)
 | `/tmp/gge_decoded.log` | Base64 expanded to text | Base64 expandido a texto |
 | `/tmp/gge_events.log` | Replayable player actions only | Solo acciones reproducibles del jugador |
 | `user-data/` | Chrome profile (session cookies) | Perfil de Chrome (cookies de sesion) |
+| `.gge-cache/` | Cached items catalog (~19 MB) | Catalogo de items cacheado (~19 MB) |
 
 ---
 

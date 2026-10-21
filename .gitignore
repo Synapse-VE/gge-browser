@@ -7,3 +7,8 @@ __pycache__/
 /tmp/*.log
 Comandos GGE
 *.bak
+
+.gge-cache/
+.gge-*.png
+.offers-*.json
+.shop-capture*.json
